@@ -1,12 +1,10 @@
-package com.hippomaru.esbot;
+package com.hippomaru.esbot.service;
 
 import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.ObjectMapper;
-import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.beans.factory.annotation.Value;
-import org.springframework.stereotype.Component;
-import org.telegram.telegrambots.meta.api.objects.InputFile;
+import org.springframework.stereotype.Service;
 
 import java.io.ByteArrayInputStream;
 import java.io.IOException;
@@ -17,21 +15,26 @@ import java.net.http.HttpResponse;
 import java.time.Duration;
 import java.util.List;
 
-@Component
-@RequiredArgsConstructor
+@Service
 @Slf4j
-public class RandomCatService {
+public class RandomCatServiceImpl implements RandomCatService {
 
-    @Value("${url.randomCatImage}")
-    private String apiUrl;
+    private final String apiUrl;
 
-    private final ObjectMapper objectMapper = new ObjectMapper();
+    private final ObjectMapper objectMapper;
 
-    private final HttpClient httpClient = HttpClient.newBuilder()
-            .connectTimeout(Duration.ofSeconds(60))
-            .build();
+    private final HttpClient httpClient;
 
-    public InputFile getRandomCatImage() throws IOException {
+    public RandomCatServiceImpl(@Value("${url.randomCatImage}") String apiUrl){
+        this.httpClient = HttpClient.newBuilder()
+                .connectTimeout(Duration.ofSeconds(60))
+                .build();
+        this.objectMapper = new ObjectMapper();
+        this.apiUrl = apiUrl;
+    }
+
+    @Override
+    public ByteArrayInputStream getRandomCatImage() throws IOException {
         try {
 
             HttpRequest request = HttpRequest.newBuilder()
@@ -43,7 +46,7 @@ public class RandomCatService {
             HttpResponse<String> response = httpClient.send(request, HttpResponse.BodyHandlers.ofString());
 
             if (response.statusCode() != 200) {
-                throw new IOException("Ошибка от API поиска котов: " + response.statusCode());
+                throw new IOException("Error while requesting the random cat image url: " + response.statusCode());
             }
 
             List<RandomCatResponse> cats = objectMapper.readValue(
@@ -52,11 +55,11 @@ public class RandomCatService {
             );
 
             if (cats.isEmpty()) {
-                throw new IOException("Пустой ответ от API поиска котов");
+                throw new IOException("Empty answer from " + apiUrl);
             }
 
             String imageUrl = cats.getFirst().url();
-            log.info("URL с рандомным котиком: {}", imageUrl);
+            log.info("Random cat image url: {}", imageUrl);
 
             HttpRequest imageRequest = HttpRequest.newBuilder()
                     .uri(URI.create(imageUrl))
@@ -66,14 +69,14 @@ public class RandomCatService {
             HttpResponse<byte[]> imageResponse = httpClient.send(imageRequest, HttpResponse.BodyHandlers.ofByteArray());
 
             if (imageResponse.statusCode() != 200) {
-                throw new IOException("Не удалось загрузить картинку кота: " + imageResponse.statusCode());
+                throw new IOException("Error while loading the image from " + imageUrl + ": " + imageResponse.statusCode());
             }
 
-            return new InputFile(new ByteArrayInputStream(imageResponse.body()), "randomCat.jpg");
+            return new ByteArrayInputStream(imageResponse.body());
 
         } catch (InterruptedException e) {
             Thread.currentThread().interrupt();
-            throw new IOException("Запрос к API был прерван", e);
+            throw new IOException("Request was interrupted: ", e);
         }
     }
 

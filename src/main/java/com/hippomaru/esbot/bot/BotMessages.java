@@ -1,4 +1,4 @@
-package com.hippomaru.esbot;
+package com.hippomaru.esbot.bot;
 
 import lombok.Getter;
 import lombok.Setter;
@@ -22,7 +22,12 @@ public class BotMessages {
     private String rKBHeader;
     private String rKBMainMenuButton;
     private String rKBRandomCatButton;
-    private String rKBRandomCatStarted;
-    private String rKBRandomCatFinished;
+    private String randomCatStarted;
+    private String randomCatFinished;
     private String defaultError;
+    private String dRGet;
+    private String dRGetNotFound;
+    private String dRUpdateImageRequest;
+    private String dRUpdateWrongInput;
+    private String dRUpdateFinished;
 }

@@ -1,4 +1,4 @@
-package com.hippomaru.esbot;
+package com.hippomaru.esbot.bot;
 
 import lombok.Getter;
 import lombok.Setter;

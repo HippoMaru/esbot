@@ -1,20 +1,22 @@
-package com.hippomaru.esbot;
+package com.hippomaru.esbot.bot;
 
+import com.hippomaru.esbot.service.DutyRosterService;
+import com.hippomaru.esbot.service.DutyRosterServiceImpl;
+import com.hippomaru.esbot.service.RandomCatService;
+import com.hippomaru.esbot.service.RandomCatServiceImpl;
 import lombok.SneakyThrows;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.beans.factory.annotation.Autowired;
-import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Component;
 import org.telegram.telegrambots.client.okhttp.OkHttpTelegramClient;
 import org.telegram.telegrambots.longpolling.util.LongPollingSingleThreadUpdateConsumer;
 import org.telegram.telegrambots.meta.api.methods.AnswerCallbackQuery;
+import org.telegram.telegrambots.meta.api.methods.GetFile;
 import org.telegram.telegrambots.meta.api.methods.send.SendMessage;
 import org.telegram.telegrambots.meta.api.methods.send.SendPhoto;
-import org.telegram.telegrambots.meta.api.objects.CallbackQuery;
-import org.telegram.telegrambots.meta.api.objects.InputFile;
-import org.telegram.telegrambots.meta.api.objects.Update;
-import org.telegram.telegrambots.meta.api.objects.User;
+import org.telegram.telegrambots.meta.api.objects.*;
 import org.telegram.telegrambots.meta.api.objects.message.Message;
+import org.telegram.telegrambots.meta.api.objects.photo.PhotoSize;
 import org.telegram.telegrambots.meta.api.objects.replykeyboard.InlineKeyboardMarkup;
 import org.telegram.telegrambots.meta.api.objects.replykeyboard.ReplyKeyboardMarkup;
 import org.telegram.telegrambots.meta.api.objects.replykeyboard.buttons.InlineKeyboardButton;
@@ -23,10 +25,13 @@ import org.telegram.telegrambots.meta.api.objects.replykeyboard.buttons.Keyboard
 import org.telegram.telegrambots.meta.exceptions.TelegramApiException;
 import org.telegram.telegrambots.meta.generics.TelegramClient;
 
+import java.io.ByteArrayInputStream;
 import java.io.IOException;
-import java.util.ArrayList;
-import java.util.Collections;
 import java.util.List;
+import java.util.Map;
+import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
 
 @Slf4j
 @Component
@@ -34,18 +39,32 @@ public class UpdateConsumer implements LongPollingSingleThreadUpdateConsumer {
 
     private final BotMessages messages;
     private final TelegramClient client;
+    private final BotProperties props;
     private final RandomCatService catService;
+    private final DutyRosterService dRService;
+    private final ExecutorService catServiceExecutor;
+    private final ExecutorService dRServiceExecutor;
 
-    public UpdateConsumer(@Autowired BotProperties props, @Autowired BotMessages messages, @Autowired RandomCatService catService) {
+    Map<Long, Boolean> waitingForDRUpdate = new ConcurrentHashMap<>();
+
+    public UpdateConsumer(@Autowired BotProperties props,
+                          @Autowired BotMessages messages,
+                          @Autowired RandomCatServiceImpl catService,
+                          @Autowired DutyRosterServiceImpl dRService) {
+        this.props = props;
         this.client = new OkHttpTelegramClient(props.getToken());
         this.messages = messages;
         this.catService = catService;
+        this.dRService = dRService;
+        this.catServiceExecutor = Executors.newFixedThreadPool(20);
+        this.dRServiceExecutor = Executors.newFixedThreadPool(20);
     }
 
 
     @SneakyThrows
     @Override
     public void consume(Update update) {
+        log.info("Update {}", update.getUpdateId());
         if (update.hasMessage()){
             processIncomingMessage(update);
         }
@@ -58,6 +77,8 @@ public class UpdateConsumer implements LongPollingSingleThreadUpdateConsumer {
         var data = callbackQuery.getData();
         var chatId = callbackQuery.getFrom().getId();
         var user = callbackQuery.getFrom();
+
+        log.info("CallBack from {}: \"{}\" chatId={}", user.getUserName(), data, chatId);
 
         client.execute(AnswerCallbackQuery.builder()
                 .callbackQueryId(callbackQuery.getId())
@@ -73,12 +94,12 @@ public class UpdateConsumer implements LongPollingSingleThreadUpdateConsumer {
     }
 
 
-    private void processRKBRandomCat(Long chatId) throws TelegramApiException {
-        sendMessage(chatId, messages.getRKBRandomCatStarted());
-        new Thread(() -> {
+    private void sendRandomCat(Long chatId) throws TelegramApiException {
+        sendMessage(chatId, messages.getRandomCatStarted());
+        catServiceExecutor.submit(() -> {
             try {
-                InputFile catImage = catService.getRandomCatImage();
-                sendPhoto(chatId, catImage, messages.getRKBRandomCatFinished());
+                InputFile catImage = new InputFile(catService.getRandomCatImage(), "randomCat.jpg");
+                sendPhoto(chatId, catImage, messages.getRandomCatFinished());
             } catch (IOException | TelegramApiException e) {
                 try {
                     sendMessage(chatId, messages.getDefaultError());
@@ -86,12 +107,56 @@ public class UpdateConsumer implements LongPollingSingleThreadUpdateConsumer {
                     throw new RuntimeException(ex);
                 }
             }
-        }).start();
+        });
     }
 
     private void processMMGreeting(Long chatId, User user) throws TelegramApiException {
         String msg = messages.getMMGreetingAnswer().formatted(user.getFirstName());
         sendMessage(chatId, msg);
+    }
+
+    private void updateDutyRoster(Message msg) throws TelegramApiException {
+        if (!msg.hasPhoto()) {
+            sendMessage(msg.getChatId(), messages.getDRUpdateWrongInput());
+            return;
+        }
+        PhotoSize photo = msg.getPhoto().getLast();
+        GetFile getFile = new GetFile(photo.getFileId());
+        File file = client.execute(getFile);
+        String fileUrl = file.getFileUrl(props.getToken());
+        dRServiceExecutor.submit(() -> {
+            try {
+                dRService.updateDutyRoster(fileUrl);
+                sendMessage(msg.getChatId(), messages.getDRUpdateFinished());
+            } catch (IOException | TelegramApiException e) {
+                try {
+                    sendMessage(msg.getChatId(), messages.getDefaultError());
+                    throw new IOException(e);
+                } catch (TelegramApiException | IOException ex) {
+                    throw new RuntimeException(ex);
+                }
+            }
+        });
+    }
+    private void sendDutyRoster(Long chatId){
+        dRServiceExecutor.submit(() -> {
+            try {
+                var dRServiceResult = dRService.getDutyRoster();
+                if (dRServiceResult == null) {
+                    sendMessage(chatId, messages.getDRGetNotFound());
+                    return;
+                }
+                InputFile dRImage = new InputFile(dRServiceResult, "dutyRoster.jpg");
+                sendPhoto(chatId, dRImage, messages.getDRGet());
+            } catch (IOException | TelegramApiException e) {
+                try {
+                    sendMessage(chatId, messages.getDefaultError());
+                    throw new IOException(e);
+                } catch (TelegramApiException | IOException ex) {
+                    throw new RuntimeException(ex);
+                }
+            }
+        });
     }
 
     private void sendMessage(Long chatId, String msg) throws TelegramApiException {
@@ -116,18 +181,30 @@ public class UpdateConsumer implements LongPollingSingleThreadUpdateConsumer {
 
     private void processIncomingMessage(Update update) throws TelegramApiException {
         Message msg = update.getMessage();
-        String text = msg.getText();
+        Long chatId = msg.getChatId();
+        String text = msg.hasText() ? msg.getText() : msg.getCaption();
+        log.info("Incoming message from {}: \"{}\" chatId={}", msg.getFrom().getUserName(), text, chatId);
+        if (waitingForDRUpdate.getOrDefault(chatId, false)) {
+            updateDutyRoster(msg);
+            waitingForDRUpdate.put(chatId, false);
+            return;
+        }
         String altCat = messages.getRKBRandomCatButton();
         String altMenu = messages.getRKBMainMenuButton();
 
         if ("/start".equals(text)) {
-            sendReplyKeyboard(msg.getChatId(), msg.getFrom().getFirstName());
+            sendReplyKeyboard(chatId, msg.getFrom().getFirstName());
         } else if ("/menu".equals(text) || altMenu.equals(text)) {
-            sendMainMenu(msg.getChatId());
+            sendMainMenu(chatId);
         } else if ("/cat".equals(text) || altCat.equals(text)) {
-            processRKBRandomCat(msg.getChatId());
+            sendRandomCat(chatId);
+        } else if ("/dr_get".equals(text)) {
+            sendDutyRoster(chatId);
+        } else if ("/dr_update".equals(text)) {
+            waitingForDRUpdate.put(chatId, true);
+            sendMessage(chatId, messages.getDRUpdateImageRequest());
         } else {
-            sendMessage(msg.getChatId(), messages.getUnsupported());
+            sendMessage(chatId, messages.getUnsupported());
         }
 
     }
